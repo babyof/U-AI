@@ -52,6 +52,7 @@ END_OF_UTTERANCE = embedded_assistant_pb2.AssistResponse.END_OF_UTTERANCE
 DIALOG_FOLLOW_ON = embedded_assistant_pb2.DialogStateOut.DIALOG_FOLLOW_ON
 CLOSE_MICROPHONE = embedded_assistant_pb2.DialogStateOut.CLOSE_MICROPHONE
 DEFAULT_GRPC_DEADLINE = 60 * 3 + 5
+voice_query = None
 
 
 class SampleAssistant(object):
@@ -109,52 +110,29 @@ class SampleAssistant(object):
 
     @retry(reraise=True, stop=stop_after_attempt(3),
            retry=retry_if_exception(is_grpc_error_unavailable))
-    def assist(self,text_query):
+    def assist(self,text_query,flag):
         """Send a voice request to the Assistant and playback the response.
 
         Returns: True if conversation should continue.
         """
-        def iter_assist_requests():
-            dialog_state_in = embedded_assistant_pb2.DialogStateIn(
-                language_code=self.language_code,
-                conversation_state=b''
-            )
-            if self.conversation_state:
-                dialog_state_in.conversation_state = self.conversation_state
-            config = embedded_assistant_pb2.AssistConfig(
-                audio_out_config=embedded_assistant_pb2.AudioOutConfig(
-                    encoding='LINEAR16',
-                    sample_rate_hertz=16000,
-                    volume_percentage=0,
-                ),
-                dialog_state_in=dialog_state_in,
-                device_config=embedded_assistant_pb2.DeviceConfig(
-                    device_id=self.device_id,
-                    device_model_id=self.device_model_id,
-                ),
-                text_query=text_query,
-            )
-            req = embedded_assistant_pb2.AssistRequest(config=config)
-            assistant_helpers.log_assist_request_without_audio(req)
-            yield req
 
         continue_conversation = False
         device_actions_futures = []
-        print(text_query)
-
         self.conversation_stream.start_recording()
         logging.info('Recording audio request.')
         display_text = None
 
-        def iter_log_assist_requests(text_query):
-            for c in self.gen_assist_requests(text_query):
+
+        def iter_log_assist_requests(text_query,flag):
+            for c in self.gen_assist_requests(text_query,flag):
                 assistant_helpers.log_assist_request_without_audio(c)
                 yield c
             logging.debug('Reached end of AssistRequest iteration.')
 
+
         # This generator yields AssistResponse proto messages
         # received from the gRPC Google Assistant API.
-        for resp in self.assistant.Assist(iter_log_assist_requests(text_query),
+        for resp in self.assistant.Assist(iter_log_assist_requests(text_query,flag),
                                           self.deadline):
             assistant_helpers.log_assist_response_without_audio(resp)
             if resp.event_type == END_OF_UTTERANCE:
@@ -163,12 +141,20 @@ class SampleAssistant(object):
                 self.conversation_stream.stop_recording()
             if resp.dialog_state_out.supplemental_display_text:
                 display_text = resp.dialog_state_out.supplemental_display_text
-                resp.dialog_state_out.supplemental_display_text ='hi'
                 print(display_text)
             if resp.speech_results:
-                logging.info('Transcript of user request: "%s".',
-                             ' '.join(r.transcript
-                                      for r in resp.speech_results))
+                voice_query=' '.join(r.transcript for r in resp.speech_results)
+                print(voice_query)
+                if  '이게 뭐야' in voice_query:
+                   # vision code
+                   self.conversation_stream.stop_playback()
+                   return self.assist('vision label',1)
+                  # self.assistant.assist('a',0)
+                if  '이게 누구야' in voice_query:
+                   # vision code
+                   self.conversation_stream.stop_playback()
+                   return self.assist('vision label',1)
+
             if len(resp.audio_out.audio_data) > 0:
                 if not self.conversation_stream.playing:
                     self.conversation_stream.start_playback()
@@ -202,7 +188,7 @@ class SampleAssistant(object):
         self.conversation_stream.stop_playback()
         return continue_conversation
 
-    def gen_assist_requests(self,text_query):
+    def gen_assist_requests(self,text_query,flag):
         """Yields: AssistRequest messages to send to the API."""
 
         dialog_state_in = embedded_assistant_pb2.DialogStateIn(
@@ -226,15 +212,20 @@ class SampleAssistant(object):
             device_config=embedded_assistant_pb2.DeviceConfig(
                 device_id=self.device_id,
                 device_model_id=self.device_model_id,
-            ),
-            text_query = text_query,
+            )
         )
+        if flag > 0:
+           config.text_query = text_query
+           yield embedded_assistant_pb2.AssistRequest(config=config)
         # The first AssistRequest must contain the AssistConfig
         # and no audio data.
-        yield embedded_assistant_pb2.AssistRequest(config=config)
-        #for data in self.conversation_stream:
+        else :
+         #  config.text_query = ""
+           yield embedded_assistant_pb2.AssistRequest(config=config)
+           for data in self.conversation_stream:
             # Subsequent requests need audio data, but not config.
-         #   yield embedded_assistant_pb2.AssistRequest(audio_in=data)
+               yield embedded_assistant_pb2.AssistRequest(audio_in=data)
+
 
 
 @click.command()
@@ -450,12 +441,14 @@ def main(api_endpoint, credentials, project_id,
         # and playing back assistant response using the speaker.
         # When the once flag is set, don't wait for a trigger. Otherwise, wait.
         wait_for_user_trigger = not once
+        print('input :')
+        text_query = input('input : ')
+        continue_conversation = assistant.assist(text_query,1)
+        wait_for_user_trigger = not continue_conversation
         while True:
-        #    if wait_for_user_trigger:
-         #       click.pause(info='Press Enter to send a new request...')
-            print('input :')
-            text_query = input('input : ')
-            continue_conversation = assistant.assist(text_query)
+            if wait_for_user_trigger:
+                click.pause(info='Press Enter to send a new request...')
+            continue_conversation = assistant.assist('a',0)
             # wait for user trigger if there is no follow-up turn in
             # the conversation.
             wait_for_user_trigger = not continue_conversation
@@ -463,7 +456,5 @@ def main(api_endpoint, credentials, project_id,
             # If we only want one conversation, break.
             if once and (not continue_conversation):
                 break
-
-
 if __name__ == '__main__':
     main()
